@@ -29,7 +29,7 @@ from TabDDPM.scripts.pipeline import main_fn as tab_ddpm_fn
 from TabDDPM.lib.dataset_prep import my_data_prep
 import miceforest as mf
 from missforest import MissForest
-from Feature_Forest_Flow import HS3FModel ### Newly Put##
+from Feature_Forest_Flow import feature_forest_flow ### Newly Put##
 def str2bool(v):
     if isinstance(v, bool):
         return v
@@ -432,7 +432,7 @@ if __name__ == "__main__":
                 #Newly Put   
                 elif method== "feature_forest_flow":
                     if args.ycond and (bin_y or cat_y):
-                        forest_model = HS3FModel(X=Xy_train_used[:,:-1], 
+                        forest_model = feature_forest_flow(X=Xy_train_used[:,:-1], 
                                 label_y=Xy_train_used[:,-1],
                                 n_t=args.n_t,
                                 model=args.forest_model, # in random_forest, xgboost, lgbm
@@ -454,7 +454,7 @@ if __name__ == "__main__":
                                 seed=n,
                                 prediction_type="proba_based")
                     else:
-                        forest_model = HS3FModel(X=Xy_train_used, 
+                        forest_model = feature_forest_flow(X=Xy_train_used, 
                                 n_t=args.n_t,
                                 model=args.forest_model, # in random_forest, xgboost, lgbm
                                 solver_type='Euler', #Turn to Rg4 if you want to use Runge Kutta 4th order

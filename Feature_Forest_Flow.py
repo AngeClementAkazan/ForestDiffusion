@@ -62,7 +62,7 @@ class IterForDMatrix(xgb.core.DataIter):
         input_data(data=x_t[y_no_miss, :], label=y[y_no_miss])
         self.it += 1
       return 1
-
+    
 ## Class for the flow-matching or diffusion model
 # Categorical features should be numerical (rather than strings), make sure to use x = pd.factorize(x)[0] to make them as such
 # Make sure to specific which features are categorical and which are integers
