@@ -1,16 +1,12 @@
 # You can uncomment the library such as lightgbm and catboost
 import math
 import numpy as np
-# from ForestDiffusion.utils.diffusion import VPSDE, get_pc_sampler
 import copy
 import xgboost as xgb
 from functools import partial
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
-# from lightgbm import LGBMRegressor,LGBMClassifier
-# from catboost import CatBoostRegressor,CatBoostClassifier
 from sklearn.preprocessing import MinMaxScaler
 import pandas as pd
-# from ForestDiffusion.utils.utils_diffusion import  euler_solve, IterForDMatrix
 from joblib import delayed, Parallel
 from scipy.special import softmax
 import random
@@ -21,7 +17,7 @@ class IterForDMatrix(xgb.core.DataIter):
     `reset` and `next` are required for any data iterator, other functions here
     are utilites for demonstration's purpose.
     """
-    def __init__(self, data,mask_cat,n_t,get_xt_y,make_mat,t,i, dim,model_type="HS3F",   n_batch=1000, n_epochs=10, eps=1e-3):
+    def __init__(self, data,mask_cat,n_t,get_xt_y,make_mat,t,i, dim,model_type="HS3F", n_batch=1000, n_epochs=10, eps=1e-3):
         self._data = data
         self.n_batch = n_batch
         self.n_epochs = n_epochs
@@ -48,19 +44,18 @@ class IterForDMatrix(xgb.core.DataIter):
       x1=self._data[self.it % self.n_batch]
       if self.dim==0:
         if not self.mask_cat[self.dim]: 
-          X_t,y= self.get_xt_y(x1,self.dim,self.t,self.i) 
-          y_no_miss = ~np.isnan(y.ravel())
-          input_data(data=X_t[y_no_miss, :], label=y[y_no_miss])
-          self.it += 1   
+          x_t,y= self.get_xt_y(x1,self.dim,self.t,self.i)
+        else:
+          # MISSING CASE HERE
       else:
         if self.mask_cat[self.dim] and self.model_type== "HS3F": 
           x_t,y= self.make_mat(x1,self.dim),x1[:,self.dim]   
         else:
           X_t,y= self.get_xt_y(x1,self.dim,self.t,self.i) 
           x_t= self.make_mat(x1,self.dim,X_t) 
-        y_no_miss = ~np.isnan(y.ravel())
-        input_data(data=x_t[y_no_miss, :], label=y[y_no_miss])
-        self.it += 1
+      y_no_miss = ~np.isnan(y.ravel())
+      input_data(data=x_t[y_no_miss, :], label=y[y_no_miss])
+      self.it += 1
       return 1
     
 ## Class for the flow-matching or diffusion model
@@ -71,30 +66,29 @@ class feature_forest_flow():
   def __init__(self, 
                X, # Numpy dataset,
                label_y=None, # must be a categorical/binary variable; if provided will learn multiple models for each label y
+               cat_y=True, # Binary variable indicating whether or not the output is categorical
                n_t=51, # number of noise level
-               model='xgboost', # xgboost, random_forest, lgbm, catboost,
-               solver_type='Euler', # solver type: argument (Euler or Rg4)
+               model='xgboost', # xgboost, random_forest
                model_type='HS3F', #HS3F for hybrid and  CS3F for regressor only
                one_hot_encoding=False,
                duplicate_K=100, # number of different noise sample per real data sample
                bin_indexes=[], # vector which indicates which column is binary
                cat_indexes=[], #Vector indicating which column is categorical
                int_indexes=[], # vector which indicates which column is an integer (ordinal variables such as number of cats in a box)
-               cat_y=True, # Binary variable indicating whether or not the output is categorical
-               max_depth = 7, n_estimators = 100, eta=0.3,   learning_rate=0.3, # xgboost hyperparameters
+               max_depth = 7, n_estimators = 100, eta=0.3,  learning_rate=0.3, # xgboost hyperparameters
                tree_method='hist', reg_alpha=0.0, reg_lambda = 0.0, subsample=1.0, # xgboost hyperparameters
                num_leaves=31, # lgbm hyperparameters
                remove_miss=False, # If True, we remove the missing values, this allow us to train the XGBoost using one model for all predictors; otherwise we cannot do it
                p_in_one=True, # When possible (when there are no missing values), will train the XGBoost using one model for all predictors
                true_min_max_values=None, # Vector of form [[min_x, min_y], [max_x, max_y]]; If  provided, we use these values as the min/max for each variables when using clipping
                gpu_hist=False, # using GPU or not with xgboost
-               n_z=10, # number of noise to use in zero-shot classification
                eps=1e-3, 
                beta_min=0.1, 
                beta_max=8, 
                n_jobs=-1, # cpus used (feel free to limit it to something small, this will leave more cpus per model; for lgbm you have to use n_jobs=1, otherwise it will never finish)
                n_batch=1, # If >0 use the data iterator with the specified number of batches
-               ngen=5,seed=999,random_state=42,
+               ngen=5,
+               seed=999,
                prediction_type="proba_based",
                arg1={},arg2={}): # you can pass extra parameter for xgboost
 
@@ -102,16 +96,13 @@ class feature_forest_flow():
     assert len(X.shape)==2, "Input dataset must have two dimensions [n,p]"
     np.random.seed(seed)
     self.one_hot_encoding=one_hot_encoding
-    self.prediction_type=prediction_type
     self.ngen=ngen
     self.n_t = n_t 
     self.duplicate_K = duplicate_K
     self.model = model
-    self.solver_type=solver_type
     self.n_estimators = n_estimators
     self.max_depth = max_depth
     self.seed = seed
-    self.random_state=random_state
     self.num_leaves = num_leaves
     self.eta = eta,
     self.learning_rate=  learning_rate
@@ -121,9 +112,6 @@ class feature_forest_flow():
     self.reg_lambda = reg_lambda
     self.reg_alpha = reg_alpha
     self.subsample = subsample
-    self.n_z = n_z
-    # self.diffusion_type = diffusion_type
-    # self.batch_size= batch_size
     self.sde = None
     self.eps = eps
     self.beta_min = beta_min
@@ -142,29 +130,22 @@ class feature_forest_flow():
     self.int_indexes = int_indexes
     self.cat_indexes=cat_indexes
     self.bin_indexes=bin_indexes
-    
-
-    # y = y[~obs_to_remove]
-    # X=np.concatenate((X,y.reshape(-1,1)), axis=1)
    
     # Construct a categorical mask for the variable (True if categorical and False otherwise)
     if self.cat_indexes is not None:
-       if  self.cat_y== True :        
-          mask_cat_bf= [i in self.cat_indexes  for i in range(X.shape[1]-1)]+[True]  #Correct
+       if self.cat_y:        
+          mask_cat_bf= [i in self.cat_indexes  for i in range(X.shape[1]-1)]+[True]
        else:
-          mask_cat_bf= [i in self.cat_indexes  for i in range(X.shape[1]-1)]+[False]  #Correct
+          mask_cat_bf= [i in self.cat_indexes  for i in range(X.shape[1]-1)]+[False]
     else:
-       if  self.cat_y== True:      
+       if self.cat_y:      
           mask_cat_bf=[False]*(X.shape[1]-1) +[True]
        else:
           mask_cat_bf=[False]*X.shape[1]
-    #Jesus
-     # Remove all missing values and shuffle data
+
+    # Remove all missing values and shuffle data
     obs_to_remove = np.isnan(X).any(axis=1)
     X = X[~obs_to_remove]
-    # indices = np.arange(len(X))
-    # np.random.shuffle(indices)
-    # X=X[indices] 
     if label_y is not None:
        X=X[:,:-1]
        mask_cat_bf= mask_cat_bf[:-1]       
@@ -176,23 +157,20 @@ class feature_forest_flow():
         self.X_max = np.nanmax(X, axis=0, keepdims=1)
     if label_y is not None:
       label_y = label_y[~obs_to_remove]
-      # label_y=label_y[indices]
     self.label_y = label_y
     self.mask_cat_bf= mask_cat_bf
     self.cat_indexes_=[i for i in range(len(self.mask_cat_bf)) if self.mask_cat_bf[i] ] # Index of categorical variables before on hot encoding
     num_cat_index=len( self.cat_indexes_) # Get the number of thos categorical variables
-    self.num_cat_index=num_cat_index      
+    self.num_cat_index=num_cat_index
     mask_cat=copy.deepcopy(self.mask_cat_bf)
-    # X = self.scaler.fit_transform(X)
     if self.num_cat_index > 0 and self.one_hot_encoding: # if there is categorical variable and and the variable one_hot_encoding is set to True
         X, self.X_names_before, self.X_names_after,mask_cat= self.dummify(X) # dummy-coding for categorical variables 
     self.X=X
     self.b , self.c = self.X.shape
     self.row_number=self.ngen*self.b
     self.mask_cat=mask_cat
-    # print(self.mask_cat_bf,self.X.shape)
-    # for i in range(len(self.mask_cat)):
-     # min-max normalization, this does not apply to the categorical data because they will be handled by a classifier
+    
+    # min-max normalization, this does not apply to the categorical data because they will be handled by a classifier
     self.scaler = MinMaxScaler(feature_range=(-1, 1))
     if self.num_cat_index  < len(self.mask_cat_bf):
       X[:,~np.array(self.mask_cat)]=self.scaler.fit_transform(X[:,~np.array(self.mask_cat)])
@@ -202,16 +180,13 @@ class feature_forest_flow():
     label_y_=self.label_y
     if self.n_batch == 0: 
       if duplicate_K >= 1: # we duplicate the data multiple times, so that X0 is k times bigger so we have more room to learn
-        duplicate_K=self.duplicate_K
-        if self.b >= 10000: #If dataset is large we reduce the duplicated value
-           duplicate_K=1
-           self.one_hot_encoding=True
-          #  self.prediction_type="model_prediction_based"
-           self.n_batch=self.b//10
+        if self.b >= 10000:
+          print("Dataset is too large, we recommend switch to mini-batch-style training by setting n_batch > 1")
         X1 = np.tile(X1, (duplicate_K, 1))
         label_y_=np.tile(self.label_y, duplicate_K)
     row_X1,_=X1.shape
     self.X1=X1
+
     #Set the label conditionning conditions
     if self.label_y is not None:
       assert np.sum(np.isnan(self.label_y)) == 0 # cannot have missing values in the label (just make a special categorical for nan if you need)
@@ -221,29 +196,22 @@ class feature_forest_flow():
       for i in range(len(self.y_uniques)):
         self.mask_y[self.y_uniques[i]] = np.zeros(row_X1, dtype=bool)
         self.mask_y[self.y_uniques[i]][label_y_ == self.y_uniques[i]] = True
-        # if self.n_batch == 0: 
-        #   self.mask_y[self.y_uniques[i]] = np.tile(self.mask_y[self.y_uniques[i]], (duplicate_K))
     else: # assuming a single unique label 0
       self.y_probs = np.array([1.0])
       self.y_uniques = np.array([0])
       self.mask_y = {} # mask for which observations has a specific value of y
       self.mask_y[0] = np.ones(X1.shape[0], dtype=bool)
     
-    # print("self.n_t:",self.n_t)
-########## Check here how to modify the the function get_xt in order to incorporate our model (per variable)####### ( Sounds like I have to define a control statement to fix the correct input and output)
+# Check here how to modify the the function get_xt in order to incorporate our model (per variable)####### ( Sounds like I have to define a control statement to fix the correct input and output)
   def train_cont_cat(self, X_train, y_train, k):  #The training models  
       y_no_miss = ~np.isnan(y_train.ravel())
       if self.mask_cat[k] and self.model_type== "HS3F":
         if self.model == 'random_forest':
-            out = RandomForestClassifier(n_estimators=self.n_estimators, max_depth=self.max_depth, random_state=self.random_state)
-        # elif self.model == 'lgbm':
-        #     out = LGBMClassifier(n_estimators=self.n_estimators, num_leaves=self.num_leaves, learning_rate=0.1, random_state=self.seed, force_col_wise=True)
-        # elif self.model == 'catboost':
-        #     out = CatBoostClassifier(iterations=self.n_estimators, loss_function='Logloss', max_depth=self.max_depth, silent=True, l2_leaf_reg=0.0, random_seed=self.seed)
+            out = RandomForestClassifier(n_estimators=self.n_estimators, max_depth=self.max_depth, random_state=self.seed)
         elif self.model == 'xgboost':
               objective = 'binary:logistic' 
               out = xgb.XGBClassifier(n_estimators=self.n_estimators+15, objective=objective,learning_rate=0.1,max_depth=self.max_depth, reg_lambda=self.reg_lambda, 
-                                      reg_alpha=self.reg_alpha, subsample=self.subsample, random_state=self.random_state,seed=self.seed,tree_method=self.tree_method,n_jobs=self.n_jobs, 
+                                      reg_alpha=self.reg_alpha, subsample=self.subsample, random_state=self.seed,tree_method=self.tree_method,n_jobs=self.n_jobs, 
                                         device='cuda' if self.gpu_hist else 'cpu', **self.arg1)
         else:
             raise Exception("model value does not exist")    
@@ -251,19 +219,13 @@ class feature_forest_flow():
         return out 
       elif not self.mask_cat[k] or self.model_type== "CS3F":
         if self.model == 'random_forest':
-            out = RandomForestRegressor(n_estimators=self.n_estimators, max_depth=self.max_depth, random_state=self.random_state)
-        # elif self.model == 'lgbm':
-        #   out = LGBMRegressor(n_estimators=self.n_estimators, num_leaves=self.num_leaves, learning_rate=0.1, random_state=self.seed, force_col_wise=True)
-        # elif self.model == 'catboost':
-        #   out = CatBoostRegressor(iterations=self.n_estimators, loss_function='RMSE', max_depth=self.max_depth, silent=True,
-        #     l2_leaf_reg=0.0, random_seed=self.seed) # consider t as a golden feature if t is a variable
+            out = RandomForestRegressor(n_estimators=self.n_estimators, max_depth=self.max_depth, random_state=self.seed)
         elif self.model == 'xgboost':
             out = xgb.XGBRegressor(n_estimators=self.n_estimators, objective='reg:squarederror', learning_rate=0.3, max_depth=self.max_depth, 
-            reg_lambda=self.reg_lambda, reg_alpha=self.reg_alpha, subsample=self.subsample, random_state=self.random_state,seed=self.seed, tree_method=self.tree_method,n_jobs=self.n_jobs, 
+            reg_lambda=self.reg_lambda, reg_alpha=self.reg_alpha, subsample=self.subsample, random_state=self.seed, tree_method=self.tree_method,n_jobs=self.n_jobs, 
             device='cuda' if self.gpu_hist else 'cpu', **self.arg2)
         else:
-            raise Exception("model value does not exists")    
-        # y_no_miss = ~np.isnan(y_train.ravel())
+            raise Exception("model value does not exists")
         out.fit(X_train[y_no_miss, :], y_train[y_no_miss])
         return out
       else:
@@ -274,18 +236,12 @@ class feature_forest_flow():
       it = IterForDMatrix(X1_splitted,self.mask_cat,n_t, self.get_xt_y,self.make_mat,t,i,dim,self.model_type, n_batch=self.n_batch, n_epochs=self.duplicate_K)
       data_iterator = xgb.QuantileDMatrix(it)
       if self.mask_cat[dim] and self.model_type=="HS3F":
-            # objective="binary:logistic" if len(np.unique(self.X1[:,dim], return_counts=False))<=2 else "multi:softmax" 
             objective="multi:softprob"
             num_class=len(np.unique(self.X1[:,dim], return_counts=False)) 
-            # num_clas,
-            # n_estimators=self.n_estimators+15if len(np.unique(self.X1[:,dim], return_counts=False))
-            # eta=self.eta[0]-0.146
             lr=0.1
       else:
           objective='reg:squarederror' 
           num_class= None
-          # eta=self.eta[0]
-          # n_estimators=self.n_estimators
           lr=self.learning_rate
       xgb_dict = {'objective':objective,'max_depth': self.max_depth,"learning_rate":lr,
             "reg_lambda": self.reg_lambda, 'reg_alpha': self.reg_alpha, "subsample": self.subsample, "seed": self.seed, 
@@ -305,8 +261,9 @@ class feature_forest_flow():
   def samp_mult(self,X):
       x0_uniques, x0_probs = np.unique(X.reshape(-1,1),return_counts=True)
       x0_probs = x0_probs/np.sum(x0_probs)
-      x0_2get=x0_uniques[np.argmax(np.random.multinomial(1, x0_probs, size=(self.row_number,)), axis=1)]
+      x0_2get = x0_uniques[np.argmax(np.random.multinomial(1, x0_probs, size=(self.row_number,)), axis=1)]
       return x0_2get
+
   def forward_process(self,X,sigma=0.0): 
       b, c =  X.shape       
       X_train = np.zeros((c, self.n_t, b,1))              # [c,n_t, b*100, 1]  # Will contain the interpolation between x0 and x1 (xt)   
@@ -326,8 +283,8 @@ class feature_forest_flow():
     X0 = np.random.normal(size=(b,1))        
     xt, ut =  t*X[:,k].reshape(-1,1)+ (1-t)*X0, X[:,k].reshape(-1,1)-X0
     return xt, ut 
-  # Make Datasets of interpolation
 
+  # Make Datasets of interpolation
   def make_mat(self,Mat,k,x_chunk=None):  # this function is okay
       if self.mask_cat[k] and self.model_type=="HS3F":
           A=()
@@ -349,6 +306,7 @@ class feature_forest_flow():
                 A+=(Mat[:,h].reshape(-1,1),)
             X_train=np.concatenate(A,axis=1)             
             return X_train  
+
   ### Training Process ####
   def training_(self,X_):  
     b, c =  X_.shape
@@ -489,11 +447,6 @@ class feature_forest_flow():
             cat_mask_indexes.append(False)
     df = df.to_numpy()
     return df, df_names_before, df_names_after,cat_mask_indexes
-
-  def unscale(self, X):
-    if self.scaler is not None: # unscale the min-max normalization
-      X = self.scaler.inverse_transform(X)
-    return X
   
   # Rounding for the categorical variables which are dummy-coded and then remove dummy-coding
   def clean_onehot_data(self, X):
@@ -524,7 +477,7 @@ class feature_forest_flow():
     # if self.label_y is not None:
     #    self.mask_cat_bf=self.mask_cat_bf[:-1]
     for i in range(len(self.mask_cat_bf)):
-       if self.mask_cat_bf[i] and self.model_type=="CS3F":#oror self.prediction_type=="model_prediction_based" 
+       if self.mask_cat_bf[i] and self.model_type=="CS3F":
          X[:,i] = np.round(X[:,i], decimals=0)
     small = (X < self.X_min).astype(float)
     X = small*self.X_min + (1-small)*X
@@ -562,7 +515,6 @@ class feature_forest_flow():
             x_prev_=xgb.DMatrix(data=x_)
             if self.prediction_type=="proba_based" or self.prediction_type=="model_prediction_based":  
               x_pred=tr_container[1][cat_count].predict(x_prev_)
-              # print(x_pred)
               row,col=x_pred.shape               
               x_fake = np.zeros(row)
               y_categories=np.array([i for i in range(col)])
@@ -570,15 +522,6 @@ class feature_forest_flow():
                   x_fake[j] = y_categories[np.argmax(np.random.multinomial(1, x_pred[j], size=1), axis=1)][0] # sample according to probability
               out[mask_y[label], k] =x_fake            
               return out 
-            # elif  self.prediction_type=="proba_based":                  
-            #   x_pred=tr_container[1][cat_count].predict_proba(x_)
-            #   row,col=x_pred.shape               
-            #   x_fake = np.zeros(row)
-            #   y_categories=np.array([i for i in range(col)])
-            #   for j in range(row):
-            #       x_fake[j] = y_categories[np.argmax(np.random.multinomial(1, x_pred[j], size=1), axis=1)][0] # sample according to probability
-            #   out[mask_y[label], k] =x_fake
-            #   return out  
             else:
                raise Exception("model type error")  
           else:
@@ -710,8 +653,8 @@ class feature_forest_flow():
           A+=(x_k,)
         A=np.concatenate(A,axis=1)
         return A     
-#  tr_container=self.training_(X1, X1_splitted,samp_mult,mask_cat)
-  def generate(self,batch_size):
+
+  def generate(self,batch_size, solver_type='Euler')
       x_k=None
       # ODE solve
       dmat=self.n_batch > 0
@@ -725,23 +668,21 @@ class feature_forest_flow():
         mask_y[self.y_uniques[i]] = np.zeros(noise.shape[0], dtype=bool)
         mask_y[self.y_uniques[i]][label_y == self.y_uniques[i]] = True
       if self.solver_type== "Euler":
-        ##euler solver 
         solution = self.euler_solve(train_c,noise,x_k,label_y,mask_y,dmat) 
-      if self.solver_type== "Rg4":
-        solution = self.Rg4(train_c,noise,x_k,label_y,mask_y,dmat) 
-       ### invert the min-max normalization for continuous data##
-          # unscale solution if a scaler was used
-      if self.num_cat_index  < len(self.mask_cat_bf):
-            solution[:,~np.array(self.mask_cat)] = self.scaler.inverse_transform(solution[:,~np.array(self.mask_cat)])
-       #Remove dummy encoding if there was
+      elif self.solver_type== "Rg4":
+        solution = self.Rg4(train_c,noise,x_k,label_y,mask_y,dmat)
+      else:
+        raise NotImplementedError()
+      # invert the min-max normalization for continuous data#
+      if self.num_cat_index  < len(self.mask_cat_bf) and self.scaler is not None:
+        solution[:,~np.array(self.mask_cat)] = self.scaler.inverse_transform(solution[:,~np.array(self.mask_cat)])
+      #Remove dummy encoding if there was
       if len(self.mask_cat_bf)!=len(self.mask_cat) and self.one_hot_encoding:
-          solution =self.clean_onehot_data(solution) 
-      # solution=self.unscale(solution)              
+        solution =self.clean_onehot_data(solution)             
       # clip to min/max values
-      solution= self.clip_extremes(solution) # this can be the cause of ValueError: XA and XB must have the same number of columns (i.e. feature dimension.)
+      solution= self.clip_extremes(solution)
       # Concatenate y label if needed
       if self.label_y is not None:
         solution = np.concatenate((solution, np.expand_dims(label_y, axis=1)), axis=1) 
-      # print(solution.shape, len(np.unique(solution[:,-1],return_counts=False)))
       return solution
         
